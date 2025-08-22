@@ -51,19 +51,27 @@ pipe = InstructPix2PixPipeline(
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--image_dir", type=str, default="./examples/coffee_frame_2x")
+    parser.add_argument("--dataset", type=str, default="dynerf")
+    parser.add_argument("--scene_name", type=str, default="cook_spinach")
     parser.add_argument("--prompt", type=str, default="What if it was painted by Van Gogh?")
     parser.add_argument("--resize", type=int, default=None)
-    parser.add_argument("--sequence_length", type=int, default=6)
     parser.add_argument("--steps", type=int, default=20)
     parser.add_argument("--guidance_scale", type=float, default=7.5)
     parser.add_argument("--image_guidance_scale", type=float, default=1.5)
     return parser.parse_args()
 
 args = parse_args()
-data_path = args.image_dir
+image_dir = f'./data/{args.dataset}/time0_{args.scene_name}/'
 
-sequence_length = args.sequence_length
+image_extensions = ('.png', '.jpg')
+try:
+    sequence_length = len([f for f in os.listdir(image_dir) 
+                       if os.path.isfile(os.path.join(image_dir, f)) and f.lower().endswith(image_extensions)])
+
+except FileNotFoundError:
+    print(f"Error: Folder not found at '{image_dir}'")
+
+#sequence_length = args.sequence_length
 prompt = args.prompt
 guidance_scale = args.guidance_scale
 image_guidance_scale = args.image_guidance_scale
@@ -74,12 +82,12 @@ latents_type = 'noisy_latents' # 'noise', 'noisy_latents'
 tag = prompt.split(' ')[-1].replace('?', '')
 
 try:
-    files = sorted(os.listdir(data_path), key=lambda x: int(x.split('.')[0]))
+    files = sorted(os.listdir(image_dir), key=lambda x: int(x.split('.')[0]))
 except:
-    files = os.listdir(data_path)
-files = [os.path.join(data_path, file) for file in files]
+    files = os.listdir(image_dir)
+files = [os.path.join(image_dir, file) for file in files]
 files = files[:sequence_length]
-print(f'Loaded {len(files)} images from {data_path}')
+print(f'Loaded {len(files)} images from {image_dir}')
 
 images = []
 for file in files:
@@ -159,11 +167,9 @@ with torch.no_grad():
     
 video = (video / 2 + 0.5).clamp(0, 1) # (b*f, 3, h, w) [-1, 1] -> [0, 1]
 
-## TODO
-save_dir = f"/workspace/siit/4DGaussians/data/multipleview/painter/{prompt.split(' ')[-1].replace('?', '')}"
+save_dir = f"./data/{args.dataset}/{args.scene_name}/{prompt.split(' ')[-1].replace('?', '')}"
 os.makedirs(save_dir, exist_ok=True)
 for i in range(sequence_length):
-    ## TODO
     filename = f"edited_{prompt.split(' ')[-1].replace('?', '')}_{os.path.basename(files[i])}"
     save_path = os.path.join(save_dir, filename)
     torchvision.utils.save_image(video[i], save_path)

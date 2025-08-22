@@ -9,3 +9,5 @@ screenshots
 data/
 data
 submodules/
+colmap/
+.ipynb_checkpoints/

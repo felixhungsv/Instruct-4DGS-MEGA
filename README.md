@@ -20,21 +20,60 @@ Recent 4D dynamic scene editing methods require editing thousands of 2D images u
 
 
 ## 📝 TODO List
-- [ ] Refactor editing pipeline
-- [ ] Polish the codes & update the doc
-
-> **🔥 Heads-up! 🔥**
-> We’re still cleaning the codebase and writing docs.  
-> **Full release is scheduled for August-September 2025**
+- [x] Refactor editing pipeline
+- [x] Polish the codes & update the doc
+- [ ] Other datasets
 
 
-
-## 📖 Getting Started
+## Getting Started
 ### Installation
+Follow these steps to set up the necessary environment and packages to run this project.
+
+1. **Install Base Dependencies**
+
+    First, please follow the installation guide in the **[4D Gaussian Splatting (4DGS)](https://github.com/hustvl/4DGaussians)** repository to install the foundational packages.
+
+2. **Install Additional Packages**
+
+    Finally, install the additional packages required for this specific project using the command below.
+    ```bash
+    conda activate Gaussians4D
+    pip install -r requirements.txt
+    ```
+
+### Data preparation
+Please follow the official 4DGS guide to process your dataset and train the model. 
+For the convenience, we provide some [pre-processed files and training outputs](https://drive.google.com/drive/folders/1WIweLubEjjhDwJlRgJ8qvnAn8tZ2ogXd?usp=sharing) for the 'cook_spinach' scene from the Dynerf dataset.
+
+1.  **Place the Initial Point Cloud**
+    * **File**: `points3D_downsample2.ply`
+    * **Destination**: `./data/dynerf/cook_spinach/`
+
+2.  **Place the Trained 4DGS Output**
+    * **Directory**: `point_cloud/`
+    * **Destination**: `./output/dynerf/cook_spinach/`
+
+## Editing 
+You can easily run the editing pipeline using the shell script below.
 ```bash
+# run_instruct_4dgs.sh [dataset] [scene_name] [prompt] [guidance_scale] [image_guidance_scale]
+bash run_instruct_4dgs.sh dynerf coffee_martini "Make it look like a fauvism painting" 10.5 1.2
+```
+
+* Some scenes within the **Dynerf dataset** are known to have missing camera views. If you are working with one of these scenes, you will need to adapt the editing script to handle the incomplete data. To resolve this, please refer to the logic around **line 247** in the `edit_3d.py` script. 
+
+* The pipeline provided in this repository is configured to perform a straightforward, baseline 3D editing process. For better consistency and visual quality, you can integrate other advanced 3D editing methodologies.
+
+
+You can check the editing results using the script below.
+```bash
+python render_edited4d.py --configs ./arguments/dynerf/cook_spinach.py --ply_path "./output/dynerf/cook_spinach/point_cloud_refine/Make it look like a fauvism painting/iteration_800/point_cloud.ply" -s ./data/dynerf/cook_spinach --model_path ./output/dynerf/cook_spinach
 ```
 
 
+
+## Acknowledgement
+This work is built on many amazing research works and open-source projects: [4DGS](https://github.com/hustvl/4DGaussians), [Instruct-4D-to-4D](https://github.com/Friedrich-M/Instruct-4D-to-4D), etc. We are grateful for their excellent work and great contributions.
 
 ## 🔗 Citation
 If you find our work helpful, please cite:

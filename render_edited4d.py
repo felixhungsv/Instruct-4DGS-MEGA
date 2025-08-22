@@ -28,7 +28,6 @@ from time import time
 import threading
 import concurrent.futures
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
-from moviepy.editor import ImageSequenceClip
 from sklearn.neighbors import NearestNeighbors
 
 def render_edited(gaussians, viewpoint_camera, mask=None):
@@ -150,7 +149,7 @@ if __name__ == "__main__":
         imgs.append(to8b(rendered_img.detach().cpu()).transpose(1,2,0))
 
     ## TODO: save_path
-    imageio.mimwrite(os.path.join(args.model_path, f"{os.path.splitext(os.path.basename(args.ply_path))[0]}.mp4"), imgs, fps=30)
+    imageio.mimwrite(os.path.join(args.model_path, f"edited_{os.path.splitext(os.path.basename(args.configs))[0]}.mp4"), imgs, fps=30)
     print("Video Saved.")
         
 

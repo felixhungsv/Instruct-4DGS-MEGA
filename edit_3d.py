@@ -90,7 +90,7 @@ dict_sear_steak = {
 
 def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations, 
                          checkpoint_iterations, checkpoint, debug_from,
-                         gaussians, scene, stage, tb_writer, train_iter,timer,edited_images_path):
+                         gaussians, scene, stage, tb_writer, train_iter,timer,edited_images_path, prompt, scene_name):
     first_iter = 0
 
     gaussians.training_only3dgs_setup(opt)
@@ -204,7 +204,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             try:
                 viewpoint_cams = next(loader)
             except StopIteration:
-                print("reset dataloader into random dataloader.")
+                #print("reset dataloader into random dataloader.")
                 if not random_loader:
                     viewpoint_stack_loader = DataLoader(subset_viewpoint_stack, batch_size=opt.batch_size,shuffle=True,num_workers=32,collate_fn=list)
                     random_loader = True
@@ -237,19 +237,29 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
             images.append(image.unsqueeze(0))
             '''
+            # [debug]
             image_numpy = (image * 255).byte().permute(1, 2, 0).cpu().numpy()  # (H, W, C)
             image_pil = Image.fromarray(image_numpy)
             image_pil.save("render_{:d}.png".format(int(viewpoint_cam.image_name)))
             '''
             if scene.dataset_type!="PanopticSports":
-                # TODO : path
-                image = Image.open(os.path.join(edited_images_path, "edited_equipment_render_time0_{:d}.png".format(dict_sear_steak[int(viewpoint_cam.image_name)])))
+                # TODO : path 
+                #image = Image.open(os.path.join(edited_images_path, f"edited_{prompt.split(' ')[-1].replace('?', '')}_original_time0_{dict_sear_steak[int(viewpoint_cam.image_name)]}.png))
+                if scene_name not in ['sear_steak', 'coffee_martini', 'cook_spinach'] and scene.maxtime < 6000:
+                    raise NotImplementedError("sorry, please check the camera settings manually and set the dict_(scene_name)")
+                if scene_name == 'sear_steak':
+                    image = Image.open(os.path.join(edited_images_path, f"edited_{prompt.split(' ')[-1].replace('?', '')}_original_time0_{dict_sear_steak[int(viewpoint_cam.image_name)]}.png"))
+                elif scene_name == 'coffee_martini':
+                    image = Image.open(os.path.join(edited_images_path, f"edited_{prompt.split(' ')[-1].replace('?', '')}_original_time0_{dict_coffee_martini[int(viewpoint_cam.image_name)]}.png"))
+                else:
+                    image = Image.open(os.path.join(edited_images_path, f"edited_{prompt.split(' ')[-1].replace('?', '')}_original_time0_{1+int(viewpoint_cam.image_name)//scene.maxtime}.png"))
                 transform = transforms.ToTensor()
                 gt_image = transform(image).cuda()
             else:
                 gt_image  = viewpoint_cam['image'].cuda()
 
             '''
+            # [debug]
             image_numpy = (gt_image * 255).byte().permute(1, 2, 0).cpu().numpy()  # (H, W, C)
             image_pil = Image.fromarray(image_numpy)
             image_pil.save("gt_{:d}.png".format(dict_sear_steak[int(viewpoint_cam.image_name)]))
@@ -259,28 +269,22 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             visibility_filter_list.append(visibility_filter.unsqueeze(0))
             viewspace_point_tensor_list.append(viewspace_point_tensor)
         
-
         radii = torch.cat(radii_list,0).max(dim=0).values
         visibility_filter = torch.cat(visibility_filter_list).any(dim=0)
         image_tensor = torch.cat(images,0)
         gt_image_tensor = torch.cat(gt_images,0)
-        # Loss
-        # breakpoint()
-        _, _, H_gt, W_gt = gt_image_tensor.shape
 
-        # image_tensor를 gt_image_tensor의 크기로 리사이즈
+        # Loss
+        _, _, H_gt, W_gt = gt_image_tensor.shape
         image_tensor = F.interpolate(
             image_tensor, size=(H_gt, W_gt), mode='bilinear', align_corners=False
         )
         
-    
         Ll1 = l1_loss(image_tensor, gt_image_tensor[:,:3,:,:])
-
         psnr_ = psnr(image_tensor, gt_image_tensor).mean().double()
         # norm
-        
-
         loss = Ll1
+
         if stage == "fine" and hyper.time_smoothness_weight != 0:
             # tv_loss = 0
             tv_loss = gaussians.compute_regulation(hyper.time_smoothness_weight, hyper.l1_time_planes, hyper.plane_tv_weight)
@@ -315,11 +319,12 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
                 progress_bar.close()
 
             # Log and save
+
             timer.pause()
             training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, [pipe, background], stage, scene.dataset_type)
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
-                scene.save_3dedit(iteration, stage)
+                scene.save_3dedit(iteration, stage, prompt)
             if dataset.render_process:
                 if (iteration < 1000 and iteration % 10 == 9) \
                     or (iteration < 3000 and iteration % 50 == 49) \
@@ -331,6 +336,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
 
                     # total_images.append(to8b(temp_image).transpose(1,2,0))
             timer.start()
+
             # Densification
             if iteration < opt.densify_until_iter :
                 # Keep track of max radii in image-space for pruning
@@ -360,7 +366,6 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
                     print("reset opacity")
                     gaussians.reset_opacity()
             
-
             # Optimizer step
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
@@ -369,7 +374,8 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" +f"_{stage}_" + str(iteration) + ".pth")
-def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, expname, edited_images_path):
+
+def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, expname, edited_images_path, prompt, scene_name):
     # first_iter = 0
     tb_writer = prepare_output_and_logger(expname)
     gaussians = GaussianModel(dataset.sh_degree, hyper)
@@ -385,7 +391,7 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, c
     
     scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
                          checkpoint_iterations, checkpoint, debug_from,
-                         gaussians, scene, "fine", tb_writer, 1000,timer,edited_images_path)
+                         gaussians, scene, "fine", tb_writer, 1000, timer, edited_images_path, prompt, scene_name)
 
 def prepare_output_and_logger(expname):    
     if not args.model_path:
@@ -461,6 +467,7 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
             tb_writer.add_histogram(f"{stage}/scene/motion_histogram", scene.gaussians._deformation_accum.mean(dim=-1)/100, iteration,max_bins=500)
         
         torch.cuda.empty_cache()
+
 def setup_seed(seed):
      torch.manual_seed(seed)
      torch.cuda.manual_seed_all(seed)
@@ -482,14 +489,17 @@ if __name__ == "__main__":
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[3000,7000,14000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[100, 300, 500, 1000, 2000, 3000])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[300, 500, 1000, 2000, 3000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
     parser.add_argument("--expname", type=str, default = "")
     parser.add_argument("--configs", type=str, default = "")
     parser.add_argument("--ply_path", type=str, default = "")
-    parser.add_argument("--edited_images_path", type=str, default = "")
+
+    parser.add_argument("--dataset", type=str, default = "")
+    parser.add_argument("--scene", type=str, default = "")
+    parser.add_argument("--prompt", type=str, default = "")
     
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
@@ -506,7 +516,10 @@ if __name__ == "__main__":
     # Start GUI server, configure and run training
     network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), hp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.expname, args.edited_images_path)
+
+    edited_images_path = f"./data/{args.dataset}/{args.scene}/{args.prompt.split(' ')[-1].replace('?', '')}"
+
+    training(lp.extract(args), hp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.expname, edited_images_path, args.prompt, args.scene)
 
     # All done
     print("\nTraining complete.")

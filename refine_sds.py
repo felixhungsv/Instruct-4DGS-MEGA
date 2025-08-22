@@ -75,17 +75,13 @@ def encode_2(ip2p, input):
     
 def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations, 
                          checkpoint_iterations, checkpoint, debug_from,
-                         gaussians, scene, stage, tb_writer, train_iter,timer, ip2p):
+                         gaussians, scene, stage, tb_writer, train_iter,timer, ip2p, prompt, guidance_scale, image_guidance_scale):
     
     torch_dtype = torch.float16
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    sequence_length = 1
+    sequence_length = 4
 
-    ## TODO : prompt, guidance scale
-    prompt = "What if it was painted by Hiroshige Utagawa"
-    guidance_scale = 8.5
-    image_guidance_scale = 1.5
     diffusion_step = 20
     num_train_timesteps = 1000
     ###
@@ -186,10 +182,12 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             try:
                 viewpoint_cams=[]
                 viewpoint_cams1 = next(loader)
-                #viewpoint_cams2 = next(loader)
+                viewpoint_cams2 = next(loader) #
                 
                 viewpoint_cams.extend(viewpoint_cams1)
-                #viewpoint_cams.extend(viewpoint_cams2)
+                viewpoint_cams.extend(viewpoint_cams2) #
+
+                #print(len(viewpoint_cams))
                 assert len(viewpoint_cams)==sequence_length, "Cams length is not equal to seg_length"
             except StopIteration:
                 print("reset dataloader into random dataloader.")
@@ -360,7 +358,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             #training_report(tb_writer, iteration, loss_sds, loss, loss_sds, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, [pipe, background], stage, scene.dataset_type)
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
-                scene.save_refine(iteration, stage)
+                scene.save_refine(iteration, stage, prompt)
             if dataset.render_process:
                 if (iteration < 1000 and iteration % 10 == 9) \
                     or (iteration < 3000 and iteration % 50 == 49) \
@@ -406,7 +404,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" +f"_{stage}_" + str(iteration) + ".pth")
-def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, expname):
+def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, expname, prompt, guidance_scale, image_guidance_scale):
     # first_iter = 0
     tb_writer = prepare_output_and_logger(expname)
     gaussians = GaussianModel(dataset.sh_degree, hyper)
@@ -447,10 +445,9 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, c
         )
     print("Ready IP2P")
 
-    ## TODO: sds iters
     scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
                          checkpoint_iterations, checkpoint, debug_from,
-                         gaussians, scene, "fine", tb_writer, 1000,timer, ip2p)
+                         gaussians, scene, "fine", tb_writer, 800, timer, ip2p, prompt, guidance_scale, image_guidance_scale)
 
 def prepare_output_and_logger(expname):    
     if not args.model_path:
@@ -542,7 +539,7 @@ if __name__ == "__main__":
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[3000, 5000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[100, 300, 500, 1000,1500,2000,3000,5000])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[100, 300, 500, 800, 1000,1500,2000,3000,5000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
@@ -550,7 +547,10 @@ if __name__ == "__main__":
     parser.add_argument("--configs", type=str, default = "")
     
     parser.add_argument("--ply_path", type=str, default = "")
-    
+    parser.add_argument("--prompt", type=str, default = "")
+    parser.add_argument('--guidance_scale', type=float, default=10.5)
+    parser.add_argument('--image_guidance_scale', type=float, default=1.2)
+
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     if args.configs:
@@ -567,7 +567,7 @@ if __name__ == "__main__":
     network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
 
-    training(lp.extract(args), hp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.expname)
+    training(lp.extract(args), hp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.expname, args.prompt, args.guidance_scale, args.image_guidance_scale)
 
     # All done
     print("\nEditing complete.")

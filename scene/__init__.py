@@ -119,20 +119,20 @@ class Scene:
         self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
         self.gaussians.save_deformation(point_cloud_path)
 
-    def save_3dedit(self, iteration, stage):
+    def save_3dedit(self, iteration, stage, prompt):
         if stage == "coarse":
             point_cloud_path = os.path.join(self.model_path, "point_cloud_3dedit/coarse_iteration_{}".format(iteration))
 
         else:
-            point_cloud_path = os.path.join(self.model_path, "point_cloud_3dedit/iteration_{}".format(iteration))
+            point_cloud_path = os.path.join(self.model_path, "point_cloud_3dedit/{}/iteration_{}".format(prompt, iteration))
         self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
         self.gaussians.save_deformation(point_cloud_path)
         
-    def save_refine(self, iteration, stage):
+    def save_refine(self, iteration, stage, prompt):
         if stage == "coarse":
             point_cloud_path = os.path.join(self.model_path, "point_cloud_refine/coarse_iteration_{}".format(iteration))
 
         else:
-            point_cloud_path = os.path.join(self.model_path, "point_cloud_refine/iteration_{}".format(iteration))
+            point_cloud_path = os.path.join(self.model_path, "point_cloud_refine/{}/iteration_{}".format(prompt, iteration))
         self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
         self.gaussians.save_deformation(point_cloud_path)
