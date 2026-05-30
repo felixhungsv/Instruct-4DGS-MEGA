@@ -292,6 +292,10 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         if opt.lambda_dssim != 0:
             ssim_loss = ssim(image_tensor,gt_image_tensor)
             loss += opt.lambda_dssim * (1.0-ssim_loss)
+        if opt.opacity_entropy_weight > 0:
+            opacity = torch.clamp(gaussians.get_opacity, 1e-6, 1 - 1e-6)
+            entropy = -(opacity * torch.log(opacity) + (1 - opacity) * torch.log(1 - opacity)).mean()
+            loss += opt.opacity_entropy_weight * entropy
         # if opt.lambda_lpips !=0:
         #     lpipsloss = lpips_loss(image_tensor,gt_image_tensor,lpips_model)
         #     loss += opt.lambda_lpips * lpipsloss
@@ -378,7 +382,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
 def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, expname, edited_images_path, prompt, scene_name):
     # first_iter = 0
     tb_writer = prepare_output_and_logger(expname)
-    gaussians = GaussianModel(dataset.sh_degree, hyper)
+    gaussians = GaussianModel(dataset.sh_degree, hyper, dataset)
     dataset.model_path = args.model_path
     timer = Timer()
     scene = Scene(dataset, gaussians, load_coarse=None)
@@ -504,9 +508,13 @@ if __name__ == "__main__":
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     if args.configs:
-        import mmcv
         from utils.params_utils import merge_hparams
-        config = mmcv.Config.fromfile(args.configs)
+        try:
+            import mmcv
+            config = mmcv.Config.fromfile(args.configs)
+        except ImportError:
+            from mmengine.config import Config
+            config = Config.fromfile(args.configs)
         args = merge_hparams(args, config)
     print("Optimizing " + args.model_path)
 

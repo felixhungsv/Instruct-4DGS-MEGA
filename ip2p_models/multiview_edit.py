@@ -58,6 +58,7 @@ def parse_args():
     parser.add_argument("--steps", type=int, default=20)
     parser.add_argument("--guidance_scale", type=float, default=7.5)
     parser.add_argument("--image_guidance_scale", type=float, default=1.5)
+    parser.add_argument("--vae_batch_size", type=int, default=4)
     return parser.parse_args()
 
 args = parse_args()
@@ -111,9 +112,20 @@ images = images.to(device, dtype=torch_dtype)
 images = F.interpolate(images, size=(RH, RW), mode='bilinear', align_corners=False) # (f, c, h, w)
 images_cond = images.clone().to(device, dtype=torch_dtype) # (f, c, h, w)
 
+def encode_vae_in_chunks(tensor, batch_size, sample_latent=True):
+    chunks = []
+    for i in range(0, tensor.shape[0], batch_size):
+        x = tensor[i:i + batch_size]
+        with torch.no_grad():
+            dist = pipe.vae.encode(2 * x - 1).latent_dist
+            z = dist.sample() if sample_latent else dist.mode()
+        chunks.append(z)
+        torch.cuda.empty_cache()
+    return torch.cat(chunks, dim=0)
+
 with torch.no_grad():
-    latents = pipe.vae.encode(2*images-1).latent_dist.sample() * 0.18215  # (b*f, 4, h//4, w//4)
-    image_latents = pipe.vae.encode(2*images_cond-1).latent_dist.mode() # (b*f, 4, h//4, w//4)
+    latents = encode_vae_in_chunks(images, args.vae_batch_size, sample_latent=True) * 0.18215
+    image_latents = encode_vae_in_chunks(images_cond, args.vae_batch_size, sample_latent=False)
 
 latents = rearrange(latents, "(b f) c h w -> b c f h w", f=sequence_length) # (b, 4, f, h//4, w//4)
 image_latents = rearrange(image_latents, "(b f) c h w -> b c f h w", f=sequence_length) # (b, 4, f, h//4, w//4)

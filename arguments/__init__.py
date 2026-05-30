@@ -47,6 +47,8 @@ class ParamGroup:
 class ModelParams(ParamGroup): 
     def __init__(self, parser, sentinel=False):
         self.sh_degree = 3
+        self.color_mode = "sh"
+        self.lite_color_hidden_dim = 16
         self._source_path = ""
         self._model_path = ""
         self._images = "images"
@@ -130,6 +132,7 @@ class OptimizationParams(ParamGroup):
         self.percent_dense = 0.01
         self.lambda_dssim = 0
         self.lambda_lpips = 0
+        self.opacity_entropy_weight = 0.0
         self.weight_constraint_init= 1
         self.weight_constraint_after = 0.2
         self.weight_decay_iteration = 5000

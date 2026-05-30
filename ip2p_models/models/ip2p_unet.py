@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import os
 import json
+import inspect
 
 import torch
 import torch.nn as nn
@@ -35,14 +36,34 @@ from .ip2p_blocks import (
     get_up_block,
 )
 from .ip2p_resnet import InflatedConv3d
-from diffusers.utils import (
-    DIFFUSERS_CACHE,
-    HF_HUB_OFFLINE,
-    SAFETENSORS_WEIGHTS_NAME,
-    _add_variant,
-    _get_model_file,
-    logging,
-)
+try:
+    from diffusers.utils import _add_variant, _get_model_file
+except Exception:
+    from diffusers.utils.hub_utils import _add_variant, _get_model_file
+
+try:
+    from diffusers.utils import DIFFUSERS_CACHE
+except Exception:
+    try:
+        from diffusers.utils.constants import DIFFUSERS_CACHE
+    except Exception:
+        DIFFUSERS_CACHE = None
+
+try:
+    from diffusers.utils import HF_HUB_OFFLINE
+except Exception:
+    try:
+        from diffusers.utils.constants import HF_HUB_OFFLINE
+    except Exception:
+        HF_HUB_OFFLINE = False
+
+try:
+    from diffusers.utils import SAFETENSORS_WEIGHTS_NAME
+except Exception:
+    try:
+        from diffusers.utils.constants import SAFETENSORS_WEIGHTS_NAME
+    except Exception:
+        SAFETENSORS_WEIGHTS_NAME = "model.safetensors"
 
 from diffusers.models.modeling_utils import load_state_dict
 
@@ -512,16 +533,24 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         subfolder = kwargs.pop("subfolder", None)
         variant = kwargs.pop("variant", None)
         
-        config = cls.load_config(
+        load_config_kwargs = dict(
             pretrained_model_name_or_path=pretrained_model_path,
             subfolder=subfolder,
             return_unused_kwargs=False,
             return_commit_hash=False,
             resume_download=force_download,
-            proxies=force_download,
             local_files_only=local_files_only,
             use_auth_token=use_auth_token,
         )
+        load_config_sig = inspect.signature(cls.load_config)
+        has_var_kwargs = any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in load_config_sig.parameters.values()
+        )
+        if not has_var_kwargs:
+            load_config_kwargs = {
+                k: v for k, v in load_config_kwargs.items() if k in load_config_sig.parameters
+            }
+        config = cls.load_config(**load_config_kwargs)
             
         config["_class_name"] = cls.__name__
         config["down_block_types"] = [
@@ -545,19 +574,29 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
             "framework": "pytorch",
         }
         
-        model_file = _get_model_file(
-            pretrained_model_path,
+        get_model_file_kwargs = dict(
+            pretrained_model_name_or_path=pretrained_model_path,
             weights_name=_add_variant(SAFETENSORS_WEIGHTS_NAME, variant),
             cache_dir=cache_dir,
             force_download=force_download,
             resume_download=force_download,
-            proxies=force_download,
             local_files_only=local_files_only,
             use_auth_token=use_auth_token,
             revision=revision,
             subfolder=subfolder,
             user_agent=user_agent,
         )
+        get_model_file_sig = inspect.signature(_get_model_file)
+        has_var_kwargs = any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in get_model_file_sig.parameters.values()
+        )
+        if has_var_kwargs:
+            filtered_kwargs = get_model_file_kwargs
+        else:
+            filtered_kwargs = {
+                k: v for k, v in get_model_file_kwargs.items() if k in get_model_file_sig.parameters
+            }
+        model_file = _get_model_file(**filtered_kwargs)
         
         model = cls.from_config(config)
         

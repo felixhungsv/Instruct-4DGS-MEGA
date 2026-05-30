@@ -11,14 +11,16 @@
 
 import torch
 import numpy as np
+import json
 from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation
 from torch import nn
+import torch.nn.functional as F
 import os
 import open3d as o3d
 from utils.system_utils import mkdir_p
 from plyfile import PlyData, PlyElement
 from random import randint
-from utils.sh_utils import RGB2SH
+from utils.sh_utils import RGB2SH, SH2RGB
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
@@ -44,10 +46,17 @@ class GaussianModel:
         self.rotation_activation = torch.nn.functional.normalize
 
 
-    def __init__(self, sh_degree : int, args):
+    def __init__(self, sh_degree : int, args, model_args=None):
+        self.color_mode = getattr(model_args, "color_mode", "sh")
+        if self.color_mode not in ("sh", "lite"):
+            raise ValueError(f"Unsupported color_mode '{self.color_mode}'.")
+        self._requested_sh_degree = sh_degree
+        effective_sh_degree = sh_degree if self.color_mode == "sh" else 0
         self.active_sh_degree = 0
-        self.max_sh_degree = sh_degree  
+        self.max_sh_degree = effective_sh_degree
         self._xyz = torch.empty(0)
+        if self.color_mode == "lite":
+            args.no_dshs = True
         self._deformation = deform_network(args)
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0)
@@ -61,11 +70,17 @@ class GaussianModel:
         self.percent_dense = 0
         self.spatial_lr_scale = 0
         self._deformation_table = torch.empty(0)
+        self.lite_color_predictor = nn.Sequential(
+            nn.Linear(7, getattr(model_args, "lite_color_hidden_dim", 16)),
+            nn.SiLU(),
+            nn.Linear(getattr(model_args, "lite_color_hidden_dim", 16), 3),
+        )
         self.setup_functions()
 
     def capture(self):
         return (
             self.active_sh_degree,
+            self.color_mode,
             self._xyz,
             self._deformation.state_dict(),
             self._deformation_table,
@@ -80,29 +95,53 @@ class GaussianModel:
             self.denom,
             self.optimizer.state_dict(),
             self.spatial_lr_scale,
+            self.lite_color_predictor.state_dict(),
         )
     
     def restore(self, model_args, training_args):
-        (self.active_sh_degree, 
-        self._xyz, 
-        deform_state,
-        self._deformation_table,
-        
-        # self.grid,
-        self._features_dc, 
-        self._features_rest,
-        self._scaling, 
-        self._rotation, 
-        self._opacity,
-        self.max_radii2D, 
-        xyz_gradient_accum, 
-        denom,
-        opt_dict, 
-        self.spatial_lr_scale) = model_args
+        lite_color_state = None
+        if len(model_args) == 14:
+            (self.active_sh_degree, 
+            self._xyz, 
+            deform_state,
+            self._deformation_table,
+            self._features_dc, 
+            self._features_rest,
+            self._scaling, 
+            self._rotation, 
+            self._opacity,
+            self.max_radii2D, 
+            xyz_gradient_accum, 
+            denom,
+            opt_dict, 
+            self.spatial_lr_scale) = model_args
+        else:
+            (self.active_sh_degree,
+            self.color_mode,
+            self._xyz,
+            deform_state,
+            self._deformation_table,
+            self._features_dc,
+            self._features_rest,
+            self._scaling,
+            self._rotation,
+            self._opacity,
+            self.max_radii2D,
+            xyz_gradient_accum,
+            denom,
+            opt_dict,
+            self.spatial_lr_scale,
+            lite_color_state) = model_args
         self._deformation.load_state_dict(deform_state)
         self.training_setup(training_args)
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
+        if lite_color_state is not None:
+            self.lite_color_predictor.load_state_dict(lite_color_state)
+        if self.color_mode == "lite":
+            self.max_sh_degree = 0
+            self.active_sh_degree = 0
+            self.convert_to_lite_color()
         self.optimizer.load_state_dict(opt_dict)
 
     @property
@@ -131,6 +170,8 @@ class GaussianModel:
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
 
     def oneupSHdegree(self):
+        if self.color_mode != "sh":
+            return
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
 
@@ -141,7 +182,8 @@ class GaussianModel:
         fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
         features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
         features[:, :3, 0 ] = fused_color
-        features[:, 3:, 1:] = 0.0
+        if features.shape[-1] > 1:
+            features[:, 3:, 1:] = 0.0
 
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
 
@@ -162,6 +204,7 @@ class GaussianModel:
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
         self._deformation_table = torch.gt(torch.ones((self.get_xyz.shape[0]),device="cuda"),0)
+        self.lite_color_predictor = self.lite_color_predictor.to("cuda")
 
     def training_only3dgs_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
@@ -174,7 +217,8 @@ class GaussianModel:
             {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
             {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
             {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
-            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
+            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"},
+            {'params': list(self.lite_color_predictor.parameters()), 'lr': training_args.feature_lr, "name": "lite_color"},
         ]
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
@@ -197,7 +241,8 @@ class GaussianModel:
             {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
             {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
             {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
-            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
+            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"},
+            {'params': list(self.lite_color_predictor.parameters()), 'lr': training_args.feature_lr, "name": "lite_color"},
             
         ]
 
@@ -261,12 +306,27 @@ class GaussianModel:
             self._deformation_table = torch.load(os.path.join(path, "deformation_table.pth"),map_location="cuda")
         if os.path.exists(os.path.join(path, "deformation_accum.pth")):
             self._deformation_accum = torch.load(os.path.join(path, "deformation_accum.pth"),map_location="cuda")
+        lite_predictor_path = os.path.join(path, "lite_color_predictor.pth")
+        if os.path.exists(lite_predictor_path):
+            self.lite_color_predictor.load_state_dict(torch.load(lite_predictor_path, map_location="cuda"))
+        meta_path = os.path.join(path, "point_cloud_meta.json")
+        if os.path.exists(meta_path):
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            self.color_mode = meta.get("color_mode", self.color_mode)
+            if self.color_mode == "lite":
+                self.max_sh_degree = 0
+                self.active_sh_degree = 0
+                self.convert_to_lite_color()
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
         # print(self._deformation.deformation_net.grid.)
     def save_deformation(self, path):
         torch.save(self._deformation.state_dict(),os.path.join(path, "deformation.pth"))
         torch.save(self._deformation_table,os.path.join(path, "deformation_table.pth"))
         torch.save(self._deformation_accum,os.path.join(path, "deformation_accum.pth"))
+        torch.save(self.lite_color_predictor.state_dict(), os.path.join(path, "lite_color_predictor.pth"))
+        with open(os.path.join(path, "point_cloud_meta.json"), "w", encoding="utf-8") as f:
+            json.dump({"color_mode": self.color_mode}, f)
     def save_ply(self, path):
         mkdir_p(os.path.dirname(path))
 
@@ -306,12 +366,14 @@ class GaussianModel:
 
         extra_f_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("f_rest_")]
         extra_f_names = sorted(extra_f_names, key = lambda x: int(x.split('_')[-1]))
-        assert len(extra_f_names)==3*(self.max_sh_degree + 1) ** 2 - 3
-        features_extra = np.zeros((xyz.shape[0], len(extra_f_names)))
-        for idx, attr_name in enumerate(extra_f_names):
-            features_extra[:, idx] = np.asarray(plydata.elements[0][attr_name])
-        # Reshape (P,F*SH_coeffs) to (P, F, SH_coeffs except DC)
-        features_extra = features_extra.reshape((features_extra.shape[0], 3, (self.max_sh_degree + 1) ** 2 - 1))
+        if len(extra_f_names) == 0:
+            features_extra = np.zeros((xyz.shape[0], 3, 0), dtype=np.float32)
+        else:
+            coeff_cnt = len(extra_f_names) // 3
+            features_extra = np.zeros((xyz.shape[0], len(extra_f_names)))
+            for idx, attr_name in enumerate(extra_f_names):
+                features_extra[:, idx] = np.asarray(plydata.elements[0][attr_name])
+            features_extra = features_extra.reshape((features_extra.shape[0], 3, coeff_cnt))
 
         scale_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("scale_")]
         scale_names = sorted(scale_names, key = lambda x: int(x.split('_')[-1]))
@@ -332,6 +394,11 @@ class GaussianModel:
         self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
         self.active_sh_degree = self.max_sh_degree
+        self.lite_color_predictor = self.lite_color_predictor.to("cuda")
+        if self.color_mode == "lite":
+            self.max_sh_degree = 0
+            self.active_sh_degree = 0
+            self.convert_to_lite_color()
 
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}
@@ -387,7 +454,10 @@ class GaussianModel:
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
-            if len(group["params"])>1:continue
+            if len(group["params"])>1:
+                if group["name"] == "lite_color":
+                    optimizable_tensors[group["name"]] = group["params"]
+                continue
             assert len(group["params"]) == 1
             extension_tensor = tensors_dict[group["name"]]
             stored_state = self.optimizer.state.get(group['params'][0], None)
@@ -431,6 +501,21 @@ class GaussianModel:
         self._deformation_accum = torch.zeros((self.get_xyz.shape[0], 3), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+
+    def convert_to_lite_color(self):
+        if self._features_rest.shape[1] != 0:
+            empty = self._features_rest[:, :0, :].detach()
+            self._features_rest = nn.Parameter(empty.contiguous().requires_grad_(True))
+
+    def compute_lite_colors(self, camera_center, means3D, time_tensor):
+        if self.color_mode != "lite":
+            return None
+        base_rgb = SH2RGB(self._features_dc[:, 0, :])
+        dirs = means3D - camera_center.unsqueeze(0).expand_as(means3D)
+        dirs = F.normalize(dirs, dim=-1)
+        predictor_input = torch.cat([base_rgb, dirs, time_tensor], dim=-1)
+        residual = self.lite_color_predictor(predictor_input)
+        return torch.clamp(base_rgb + residual, 0.0, 1.0)
 
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]

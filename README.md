@@ -60,6 +60,20 @@ You can easily run the editing pipeline using the shell script below.
 bash run_instruct_4dgs.sh dynerf coffee_martini "Make it look like a fauvism painting" 10.5 1.2
 ```
 
+For the cook_spinach 3-prompt benchmark (baseline and hybrid):
+```bash
+# baseline
+bash script.sh dynerf cook_spinach 10.5 1.2 sh 0.0
+
+# MEGA-inspired hybrid (lite color + entropy regularization)
+bash script.sh dynerf cook_spinach 10.5 1.2 lite 0.002
+```
+
+You can pack a checkpoint with fp16 + zip:
+```bash
+python scripts/pack_model_fp16.py pack --path "./output/dynerf/cook_spinach/point_cloud_refine/Make it look like a fauvism painting/iteration_800"
+```
+
 * Some scenes within the **Dynerf dataset** are known to have missing camera views. If you are working with one of these scenes, you will need to adapt the editing script to handle the incomplete data. To resolve this, please refer to the logic around **line 247** in the `edit_3d.py` script. 
 
 * The pipeline provided in this repository is configured to perform a straightforward, baseline 3D editing process. For better consistency and visual quality, you can integrate other advanced 3D editing methodologies.

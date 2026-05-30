@@ -126,7 +126,12 @@ def fetchPly(path):
     vertices = plydata['vertex']
     positions = np.vstack([vertices['x'], vertices['y'], vertices['z']]).T
     colors = np.vstack([vertices['red'], vertices['green'], vertices['blue']]).T / 255.0
-    normals = np.vstack([vertices['nx'], vertices['ny'], vertices['nz']]).T
+    names = set(vertices.data.dtype.names or [])
+    if {'nx', 'ny', 'nz'}.issubset(names):
+        normals = np.vstack([vertices['nx'], vertices['ny'], vertices['nz']]).T
+    else:
+        # Some preprocessed PLY files do not include normals.
+        normals = np.zeros_like(positions, dtype=np.float32)
     return BasicPointCloud(points=positions, colors=colors, normals=normals)
 
 def storePly(path, xyz, rgb):
@@ -520,7 +525,7 @@ def plot_camera_orientations(cam_list, xyz):
 
     ax.scatter(xyz[:,0],xyz[:,1],xyz[:,2],c='r',s=0.1)
     for cam in tqdm(cam_list):
-        # 提取 R 和 T
+        # Extract camera rotation and translation.
         R = cam.R
         T = cam.T
 

@@ -73,12 +73,22 @@ def render_edited(gaussians, viewpoint_camera, mask=None):
     rotations_final = gaussians.rotation_activation(rotations_final)
     opacity_final = gaussians.opacity_activation(opacity_final)
     
+    if gaussians.color_mode == "lite":
+        colors_precomp = gaussians.compute_lite_colors(
+            viewpoint_camera.camera_center.cuda(),
+            means3D_final,
+            time.to(means3D_final.dtype),
+        )
+        shs_final = None
+    else:
+        colors_precomp = None
+
     if (mask is None):
         rendered_image, radii, depth = rasterizer(
             means3D = means3D_final,
             means2D = means2D,
             shs = shs_final,
-            colors_precomp = None,
+            colors_precomp = colors_precomp,
             opacities = opacity_final,
             scales = scales_final,
             rotations = rotations_final,
@@ -88,8 +98,8 @@ def render_edited(gaussians, viewpoint_camera, mask=None):
         rendered_image, radii, depth = rasterizer(
             means3D = means3D_final[mask],
             means2D = means2D,
-            shs = shs_final[mask],
-            colors_precomp = None,
+            shs = shs_final[mask] if shs_final is not None else None,
+            colors_precomp = colors_precomp[mask] if colors_precomp is not None else None,
             opacities = opacity_final[mask],
             scales = scales_final[mask],
             rotations = rotations_final[mask],
@@ -113,9 +123,13 @@ if __name__ == "__main__":
     args = get_combined_args(parser)
     print("Rendering " , args.ply_path)
     if args.configs:
-        import mmcv
         from utils.params_utils import merge_hparams
-        config = mmcv.Config.fromfile(args.configs)
+        try:
+            import mmcv
+            config = mmcv.Config.fromfile(args.configs)
+        except ImportError:
+            from mmengine.config import Config
+            config = Config.fromfile(args.configs)
         args = merge_hparams(args, config)
     # Initialize system state (RNG)
     safe_state(args.quiet)
@@ -123,7 +137,7 @@ if __name__ == "__main__":
     dataset= model.extract(args)
     iteration = args.iteration
     hyperparam = hyperparam.extract(args)
-    gaussians = GaussianModel(dataset.sh_degree, hyperparam)
+    gaussians = GaussianModel(dataset.sh_degree, hyperparam, dataset)
     scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
     
     before_xyz = gaussians.get_xyz

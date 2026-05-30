@@ -4,7 +4,14 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from diffusers.utils import maybe_allow_in_graph
+try:
+    from diffusers.utils import maybe_allow_in_graph
+except Exception:
+    try:
+        from diffusers.utils.torch_utils import maybe_allow_in_graph
+    except Exception:
+        def maybe_allow_in_graph(fn):
+            return fn
 from diffusers.models.attention_processor import Attention
 from diffusers.models.attention import FeedForward, AdaLayerNorm
 from diffusers.utils.import_utils import is_xformers_available

@@ -9,23 +9,21 @@ def quaternion_to_rotation_matrix(quat):
     return R.from_quat(quat).as_matrix()
 
 def quaternion_slerp(q1, q2, t):
-    # 计算两个四元数之间的点积
+    # Dot product between two quaternions.
     dot = np.dot(q1, q2)
 
-    # 如果点积为负，取反一个四元数以保证最短路径插值
+    # Flip one quaternion to follow the shortest arc.
     if dot < 0.0:
         q1 = -q1
         dot = -dot
 
-    # 防止数值误差导致的问题
+    # Clamp for numerical stability.
     dot = np.clip(dot, -1.0, 1.0)
 
-    # 计算插值参数
     theta = np.arccos(dot) * t
     q3 = q2 - q1 * dot
     q3 = q3 / np.linalg.norm(q3)
 
-    # 计算插值结果
     return np.cos(theta) * q1 + np.sin(theta) * q3
 
 def bezier_interpolation(p1, p2, t):

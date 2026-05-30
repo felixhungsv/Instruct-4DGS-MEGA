@@ -17,9 +17,12 @@ from diffusers.utils import (
     is_accelerate_available,
     is_accelerate_version,
     logging,
-    randn_tensor,
     BaseOutput,
 )
+try:
+    from diffusers.utils import randn_tensor
+except ImportError:
+    from diffusers.utils.torch_utils import randn_tensor
 
 from einops import rearrange
 

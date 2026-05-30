@@ -65,17 +65,23 @@ import os
 
 from pytorch_lightning import seed_everything   
 
-def encode_1(ip2p, input):
-    latents = ip2p.vae.encode(2*input-1).latent_dist.sample() * 0.18215  # (b*f, 4, h//4, w//4)
-    return latents
-
-def encode_2(ip2p, input):
-    image_latents = ip2p.vae.encode(2*input-1).latent_dist.mode() # (b*f, 4, h//4, w//4)
-    return image_latents
+def encode_vae_in_chunks(ip2p, inputs, batch_size, sample_latent, requires_grad):
+    chunks = []
+    for i in range(0, inputs.shape[0], batch_size):
+        x = inputs[i:i + batch_size]
+        if requires_grad:
+            dist = ip2p.vae.encode(2 * x - 1).latent_dist
+            z = dist.sample() if sample_latent else dist.mode()
+        else:
+            with torch.no_grad():
+                dist = ip2p.vae.encode(2 * x - 1).latent_dist
+                z = dist.sample() if sample_latent else dist.mode()
+        chunks.append(z)
+    return torch.cat(chunks, dim=0)
     
 def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations, 
                          checkpoint_iterations, checkpoint, debug_from,
-                         gaussians, scene, stage, tb_writer, train_iter,timer, ip2p, prompt, guidance_scale, image_guidance_scale):
+                         gaussians, scene, stage, tb_writer, train_iter,timer, ip2p, prompt, guidance_scale, image_guidance_scale, sds_resize, vae_batch_size):
     
     torch_dtype = torch.float16
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -241,8 +247,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         
         dataset_length, C, H, W = image_tensor.shape
         
-        args.resize = 1024
-        factor = args.resize / max(W, H)
+        factor = sds_resize / max(W, H)
         factor = math.ceil(min(W, H) * factor / 64) * 64 / min(W, H)
         new_width = int((W * factor) // 64) * 64
         new_height = int((H * factor) // 64) * 64
@@ -253,8 +258,12 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         
         #print(vae_input_images.shape) # fx3x768x1024
         
-        latents = encode_1(ip2p, vae_input_images)
-        image_latents = encode_2(ip2p, vae_input_images_cond)
+        latents = encode_vae_in_chunks(
+            ip2p, vae_input_images, vae_batch_size, sample_latent=True, requires_grad=True
+        ) * 0.18215
+        image_latents = encode_vae_in_chunks(
+            ip2p, vae_input_images_cond, vae_batch_size, sample_latent=False, requires_grad=False
+        )
 
         #print(latents.shape) # fx4x96x128
         
@@ -320,6 +329,10 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         # norm
         
         loss = loss_sds
+        if opt.opacity_entropy_weight > 0:
+            opacity = torch.clamp(gaussians.get_opacity, 1e-6, 1 - 1e-6)
+            entropy = -(opacity * torch.log(opacity) + (1 - opacity) * torch.log(1 - opacity)).mean()
+            loss += opt.opacity_entropy_weight * entropy
         #if stage == "fine" and hyper.time_smoothness_weight != 0:
             # tv_loss = 0
         #     tv_loss = gaussians.compute_regulation(hyper.time_smoothness_weight, hyper.l1_time_planes, hyper.plane_tv_weight)
@@ -404,10 +417,10 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" +f"_{stage}_" + str(iteration) + ".pth")
-def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, expname, prompt, guidance_scale, image_guidance_scale):
+def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, expname, prompt, guidance_scale, image_guidance_scale, sds_resize, vae_batch_size):
     # first_iter = 0
     tb_writer = prepare_output_and_logger(expname)
-    gaussians = GaussianModel(dataset.sh_degree, hyper)
+    gaussians = GaussianModel(dataset.sh_degree, hyper, dataset)
     dataset.model_path = args.model_path
     timer = Timer()
     scene = Scene(dataset, gaussians, load_coarse=None)
@@ -447,7 +460,7 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, c
 
     scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
                          checkpoint_iterations, checkpoint, debug_from,
-                         gaussians, scene, "fine", tb_writer, 800, timer, ip2p, prompt, guidance_scale, image_guidance_scale)
+                         gaussians, scene, "fine", tb_writer, 800, timer, ip2p, prompt, guidance_scale, image_guidance_scale, sds_resize, vae_batch_size)
 
 def prepare_output_and_logger(expname):    
     if not args.model_path:
@@ -550,13 +563,19 @@ if __name__ == "__main__":
     parser.add_argument("--prompt", type=str, default = "")
     parser.add_argument('--guidance_scale', type=float, default=10.5)
     parser.add_argument('--image_guidance_scale', type=float, default=1.2)
+    parser.add_argument('--sds_resize', type=int, default=640)
+    parser.add_argument('--vae_batch_size', type=int, default=1)
 
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     if args.configs:
-        import mmcv
         from utils.params_utils import merge_hparams
-        config = mmcv.Config.fromfile(args.configs)
+        try:
+            import mmcv
+            config = mmcv.Config.fromfile(args.configs)
+        except ImportError:
+            from mmengine.config import Config
+            config = Config.fromfile(args.configs)
         args = merge_hparams(args, config)
     print("Optimizing " + args.model_path)
 
@@ -567,7 +586,7 @@ if __name__ == "__main__":
     network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
 
-    training(lp.extract(args), hp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.expname, args.prompt, args.guidance_scale, args.image_guidance_scale)
+    training(lp.extract(args), hp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.expname, args.prompt, args.guidance_scale, args.image_guidance_scale, args.sds_resize, args.vae_batch_size)
 
     # All done
     print("\nEditing complete.")
