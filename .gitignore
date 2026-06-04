@@ -11,3 +11,4 @@ data
 submodules/
 colmap/
 .ipynb_checkpoints/
+run.ipynb

@@ -155,7 +155,8 @@ if __name__ == "__main__":
     print("after edit: ", gaussians.get_xyz.shape)
 
     ## VideoCameras: moving camera / TestCameras: fixed camera (for DyNeRF)
-    cameras = scene.getVideoCameras()
+    # cameras = scene.getVideoCameras()
+    cameras = scene.getTestCameras()
     imgs = []
     to8b = lambda x : (255*np.clip(x.cpu().numpy(),0,1)).astype(np.uint8)
     for idx, viewpoint_camera in enumerate(tqdm(cameras, desc="Rendering progress")):

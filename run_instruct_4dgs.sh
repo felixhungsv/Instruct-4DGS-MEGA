@@ -37,7 +37,7 @@ python ./ip2p_models/multiview_edit.py \
     --dataset "${DATASET}" \
     --scene "${SCENE_NAME}" \
     --prompt "${PROMPT}" \
-    --resize 768 \
+    --resize 1024 \
     --steps 20 \
     --vae_batch_size 2 \
     --guidance_scale ${GUIDANCE_SCALE} \
@@ -70,7 +70,6 @@ python refine_sds.py \
     --prompt "${PROMPT}" \
     --guidance_scale ${GUIDANCE_SCALE} \
     --image_guidance_scale ${IMAGE_GUIDANCE_SCALE} \
-    --sds_resize 640 \
     --vae_batch_size 1 \
     --color_mode "${COLOR_MODE}" \
     --opacity_entropy_weight "${ENTROPY_WEIGHT}"
