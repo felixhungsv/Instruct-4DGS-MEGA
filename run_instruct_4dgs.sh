@@ -1,12 +1,13 @@
 #!/bin/bash
-set -euo pipefail
 
 # ===================================================================
-# ./run_instruct_4dgs.sh [dataset] [scene_name] [prompt] [guidance_scale] [image_guidance_scale] [color_mode] [entropy_weight]
+# ./run_instruct_4dgs.sh [dataset] [scene_name] [prompt] [guidance_scale] [image_guidance_scale] [resize]
 # ===================================================================
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-if [ "$#" -lt 5 ]; then
-    echo "Usage: $0 <dataset> <scene_name> <prompt> <guidance_scale> <image_guidance_scale> [color_mode] [entropy_weight]"
+if [ "$#" -lt 5 ] || [ "$#" -gt 6 ]; then
+    echo "Usage: $0 <dataset> <scene_name> <prompt> <guidance_scale> <image_guidance_scale> [resize]"
+    echo "  resize is optional; omit to use original image resolution"
     exit 1
 fi
 
@@ -15,16 +16,26 @@ SCENE_NAME="$2"
 PROMPT="$3"
 GUIDANCE_SCALE="$4"
 IMAGE_GUIDANCE_SCALE="$5"
-COLOR_MODE="${6:-sh}"
-ENTROPY_WEIGHT="${7:-0.0}"
+RESIZE="${6:-}"
 
-echo "------------------------------------------"
-echo "  - dataset: ${DATASET}"
-echo "  - scene: ${SCENE_NAME}"
-echo "  - prompt: \"${PROMPT}\""
-echo "  - color_mode: ${COLOR_MODE}"
-echo "  - entropy_weight: ${ENTROPY_WEIGHT}"
-echo "------------------------------------------"
+# Build optional resize flag
+if [ -n "${RESIZE}" ]; then
+    RESIZE_FLAG="--resize ${RESIZE}"
+    echo "------------------------------------------"
+    echo "  - dataset: ${DATASET}"
+    echo "  - scene: ${SCENE_NAME}"
+    echo "  - prompt: \"${PROMPT}\""
+    echo "  - resize: ${RESIZE}"
+    echo "------------------------------------------"
+else
+    RESIZE_FLAG=""
+    echo "------------------------------------------"
+    echo "  - dataset: ${DATASET}"
+    echo "  - scene: ${SCENE_NAME}"
+    echo "  - prompt: \"${PROMPT}\""
+    echo "  - resize: (original resolution)"
+    echo "------------------------------------------"
+fi
 echo ""
 
 echo "[1/4] Collect time0 images..."
@@ -37,9 +48,8 @@ python ./ip2p_models/multiview_edit.py \
     --dataset "${DATASET}" \
     --scene "${SCENE_NAME}" \
     --prompt "${PROMPT}" \
-    --resize 1024 \
+    ${RESIZE_FLAG} \
     --steps 20 \
-    --vae_batch_size 2 \
     --guidance_scale ${GUIDANCE_SCALE} \
     --image_guidance_scale ${IMAGE_GUIDANCE_SCALE}
 
@@ -54,10 +64,7 @@ python edit_3d.py \
     --model_path "./output/${DATASET}/${SCENE_NAME}" \
     --dataset "${DATASET}" \
     --scene "${SCENE_NAME}" \
-    --prompt "${PROMPT}" \
-    --color_mode "${COLOR_MODE}" \
-    --opacity_entropy_weight "${ENTROPY_WEIGHT}"
-
+    --prompt "${PROMPT}" 
 echo "✅ Completed 3d editing."
 echo ""
 
@@ -70,9 +77,7 @@ python refine_sds.py \
     --prompt "${PROMPT}" \
     --guidance_scale ${GUIDANCE_SCALE} \
     --image_guidance_scale ${IMAGE_GUIDANCE_SCALE} \
-    --vae_batch_size 1 \
-    --color_mode "${COLOR_MODE}" \
-    --opacity_entropy_weight "${ENTROPY_WEIGHT}"
+    ${RESIZE_FLAG}
 
 echo "✅ Completed score refinement."
 echo ""

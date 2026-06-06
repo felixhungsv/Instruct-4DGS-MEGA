@@ -43,6 +43,7 @@ from diffusers import (
     DDIMScheduler,
     AutoencoderKL,
     )
+from diffusers.models.attention_processor import AttnProcessor2_0
 from transformers import (
     CLIPTextModel, 
     CLIPTokenizer
@@ -65,28 +66,22 @@ import os
 
 from pytorch_lightning import seed_everything   
 
-def encode_vae_in_chunks(ip2p, inputs, batch_size, sample_latent, requires_grad):
-    chunks = []
-    for i in range(0, inputs.shape[0], batch_size):
-        x = inputs[i:i + batch_size]
-        if requires_grad:
-            dist = ip2p.vae.encode(2 * x - 1).latent_dist
-            z = dist.sample() if sample_latent else dist.mode()
-        else:
-            with torch.no_grad():
-                dist = ip2p.vae.encode(2 * x - 1).latent_dist
-                z = dist.sample() if sample_latent else dist.mode()
-        chunks.append(z)
-    return torch.cat(chunks, dim=0)
+def encode_1(ip2p, input):
+    latents = ip2p.vae.encode(2*input-1).latent_dist.sample() * 0.18215  # (b*f, 4, h//4, w//4)
+    return latents
+
+def encode_2(ip2p, input):
+    image_latents = ip2p.vae.encode(2*input-1).latent_dist.mode() # (b*f, 4, h//4, w//4)
+    return image_latents
     
 def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations, 
                          checkpoint_iterations, checkpoint, debug_from,
-                         gaussians, scene, stage, tb_writer, train_iter,timer, ip2p, prompt, guidance_scale, image_guidance_scale, sds_resize, vae_batch_size):
+                         gaussians, scene, stage, tb_writer, train_iter,timer, ip2p, prompt, guidance_scale, image_guidance_scale):
     
     torch_dtype = torch.float16
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    sequence_length = 4
+    sequence_length = 2
 
     diffusion_step = 20
     num_train_timesteps = 1000
@@ -144,6 +139,20 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
     else:
         load_in_memory = False 
                             # 
+    ip2p.scheduler.config.num_train_timesteps = num_train_timesteps
+    ip2p.scheduler.set_timesteps(diffusion_step)
+    with torch.no_grad():
+        prompt_embeds = ip2p._encode_prompt(
+            prompt,
+            device=device,
+            num_images_per_prompt=1,
+            do_classifier_free_guidance=True,
+        ).detach()  # [3, 77, 768] — constant for entire training run
+
+    # text_encoder is never needed again — move to CPU to free ~300 MB VRAM
+    ip2p.text_encoder.to('cpu')
+    torch.cuda.empty_cache()
+
     count = 0
     for iteration in range(first_iter, final_iter+1):        
         if network_gui.conn == None:
@@ -186,14 +195,11 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         # dynerf's branch
         if opt.dataloader and not load_in_memory:
             try:
-                viewpoint_cams=[]
-                viewpoint_cams1 = next(loader)
-                viewpoint_cams2 = next(loader) #
-                
-                viewpoint_cams.extend(viewpoint_cams1)
-                viewpoint_cams.extend(viewpoint_cams2) #
+                viewpoint_cams = []
+                batches_to_load = max(1, sequence_length // batch_size)
+                for _ in range(batches_to_load):
+                    viewpoint_cams.extend(next(loader))
 
-                #print(len(viewpoint_cams))
                 assert len(viewpoint_cams)==sequence_length, "Cams length is not equal to seg_length"
             except StopIteration:
                 print("reset dataloader into random dataloader.")
@@ -247,7 +253,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         
         dataset_length, C, H, W = image_tensor.shape
         
-        factor = sds_resize / max(W, H)
+        factor = args.resize / max(W, H)
         factor = math.ceil(min(W, H) * factor / 64) * 64 / min(W, H)
         new_width = int((W * factor) // 64) * 64
         new_height = int((H * factor) // 64) * 64
@@ -258,12 +264,10 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         
         #print(vae_input_images.shape) # fx3x768x1024
         
-        latents = encode_vae_in_chunks(
-            ip2p, vae_input_images, vae_batch_size, sample_latent=True, requires_grad=True
-        ) * 0.18215
-        image_latents = encode_vae_in_chunks(
-            ip2p, vae_input_images_cond, vae_batch_size, sample_latent=False, requires_grad=False
-        )
+        torch.cuda.empty_cache()
+        latents = encode_1(ip2p, vae_input_images)
+        with torch.no_grad():
+            image_latents = encode_2(ip2p, vae_input_images_cond)
 
         #print(latents.shape) # fx4x96x128
         
@@ -271,16 +275,6 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         image_latents = rearrange(image_latents, "(b f) c h w -> b c f h w", f=sequence_length).to(device=device, dtype=torch_dtype)  # (b, 4, f, h//4, w//4)
         uncond_image_latents = torch.zeros_like(image_latents)
 
-        prompt_embeds = ip2p._encode_prompt(
-            prompt,
-            device=device,
-            num_images_per_prompt=1,
-            do_classifier_free_guidance=True,
-        ) # [3b, 77, 768]
-        
-        ip2p.scheduler.config.num_train_timesteps = num_train_timesteps
-        ip2p.scheduler.set_timesteps(diffusion_step)
-        
         noise = torch.randn_like(latents) # (b, 4, f, h//4, w//4)
         t = torch.randint(
             int(1000*0.02 - 1), #scheduler.config.num_train_timesteps
@@ -292,19 +286,18 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         latents = ip2p.scheduler.add_noise(latents, noise, t)  
         #print("noise: ", noise.shape) # 1x4xfx96x128
         
-        image_latents = torch.cat([image_latents, image_latents, uncond_image_latents], dim=0) # (3b, 4, f, h//4, w//4)
-
-        latent_model_input = torch.cat([latents] * 3) # [3b, 4, sequence_length, h//4, w//4]
-        latent_model_input = torch.cat([latent_model_input, image_latents], dim=1) # [3b, 8, sequence_length, h//4, w//4]
-    
-        # predict the noise residual
-    
+        # predict the noise residual — run 3 separate passes to avoid [3b,...] peak activation
         with torch.no_grad():
-            noise_pred = ip2p.unet(latent_model_input, t, prompt_embeds, None, None, False)[0] # [3b, 4, sequence_length, h//4, w//4]
+            noise_pred_text = ip2p.unet(
+                torch.cat([latents, image_latents], dim=1), t, prompt_embeds[0:1], None, None, False
+            )[0]
+            noise_pred_image = ip2p.unet(
+                torch.cat([latents, image_latents], dim=1), t, prompt_embeds[1:2], None, None, False
+            )[0]
+            noise_pred_uncond = ip2p.unet(
+                torch.cat([latents, uncond_image_latents], dim=1), t, prompt_embeds[2:3], None, None, False
+            )[0]
 
-            # perform classifier-free guidance
-            noise_pred_text, noise_pred_image, noise_pred_uncond = noise_pred.chunk(3)
-            
             noise_pred = (
                 noise_pred_uncond
                 + guidance_scale * (noise_pred_text - noise_pred_image)
@@ -329,10 +322,6 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         # norm
         
         loss = loss_sds
-        if opt.opacity_entropy_weight > 0:
-            opacity = torch.clamp(gaussians.get_opacity, 1e-6, 1 - 1e-6)
-            entropy = -(opacity * torch.log(opacity) + (1 - opacity) * torch.log(1 - opacity)).mean()
-            loss += opt.opacity_entropy_weight * entropy
         #if stage == "fine" and hyper.time_smoothness_weight != 0:
             # tv_loss = 0
         #     tv_loss = gaussians.compute_regulation(hyper.time_smoothness_weight, hyper.l1_time_planes, hyper.plane_tv_weight)
@@ -417,10 +406,10 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" +f"_{stage}_" + str(iteration) + ".pth")
-def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, expname, prompt, guidance_scale, image_guidance_scale, sds_resize, vae_batch_size):
+def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, expname, prompt, guidance_scale, image_guidance_scale):
     # first_iter = 0
     tb_writer = prepare_output_and_logger(expname)
-    gaussians = GaussianModel(dataset.sh_degree, hyper, dataset)
+    gaussians = GaussianModel(dataset.sh_degree, hyper)
     dataset.model_path = args.model_path
     timer = Timer()
     scene = Scene(dataset, gaussians, load_coarse=None)
@@ -449,9 +438,12 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, c
     unet.requires_grad_(False)
 
     vae = vae.to(device, dtype=torch_dtype)
+    vae.enable_slicing()
     text_encoder = text_encoder.to(device, dtype=torch_dtype)
     unet = unet.to(device, dtype=torch_dtype)
-            
+    unet.set_attn_processor(AttnProcessor2_0())
+    unet.enable_gradient_checkpointing()
+
     ip2p = InstructPix2PixPipeline(
             vae=vae, text_encoder=text_encoder, tokenizer=tokenizer, unet=unet,
             scheduler=DDIMScheduler.from_pretrained(DDIM_SOURCE, subfolder="scheduler"),
@@ -460,7 +452,7 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, c
 
     scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
                          checkpoint_iterations, checkpoint, debug_from,
-                         gaussians, scene, "fine", tb_writer, 800, timer, ip2p, prompt, guidance_scale, image_guidance_scale, sds_resize, vae_batch_size)
+                         gaussians, scene, "fine", tb_writer, 800, timer, ip2p, prompt, guidance_scale, image_guidance_scale)
 
 def prepare_output_and_logger(expname):    
     if not args.model_path:
@@ -563,19 +555,14 @@ if __name__ == "__main__":
     parser.add_argument("--prompt", type=str, default = "")
     parser.add_argument('--guidance_scale', type=float, default=10.5)
     parser.add_argument('--image_guidance_scale', type=float, default=1.2)
-    parser.add_argument('--sds_resize', type=int, default=640)
-    parser.add_argument('--vae_batch_size', type=int, default=1)
+    parser.add_argument('--resize', type=int, default=512)
 
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     if args.configs:
+        from mmengine import Config
         from utils.params_utils import merge_hparams
-        try:
-            import mmcv
-            config = mmcv.Config.fromfile(args.configs)
-        except ImportError:
-            from mmengine.config import Config
-            config = Config.fromfile(args.configs)
+        config = Config.fromfile(args.configs)
         args = merge_hparams(args, config)
     print("Optimizing " + args.model_path)
 
@@ -586,7 +573,7 @@ if __name__ == "__main__":
     network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
 
-    training(lp.extract(args), hp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.expname, args.prompt, args.guidance_scale, args.image_guidance_scale, args.sds_resize, args.vae_batch_size)
+    training(lp.extract(args), hp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.expname, args.prompt, args.guidance_scale, args.image_guidance_scale)
 
     # All done
     print("\nEditing complete.")
